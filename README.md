@@ -16,3 +16,17 @@ This bot checks every 24 hours whether Discord users with linked Twitch accounts
 
 Set the following in your Render dashboard or a `.env` file (for local development):
 
+### 2. Install Requirements
+
+
+### 3. Run the Bot
+
+## Note
+
+You must manually link Discord users to their Twitch usernames in the code (`linked_accounts` dictionary) unless you implement a system to do it automatically.
+
+## License
+
+MIT License (or whatever you prefer)
+
+
