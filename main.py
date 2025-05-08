@@ -1,21 +1,24 @@
 import os
-import json
 import discord
 from discord.ext import tasks, commands
 import aiohttp
+from deta import Deta
 from dotenv import load_dotenv
 
-load_dotenv()  # Only needed for local dev
+load_dotenv()  # Only for local use
 
-# Load secrets from environment
+# Environment Variables
 TOKEN = os.getenv('DISCORD_BOT_TOKEN')
 GUILD_ID = int(os.getenv('DISCORD_GUILD_ID'))
 TWITCH_SUB_ROLE_ID = int(os.getenv('TWITCH_SUB_ROLE_ID'))
 TWITCH_CLIENT_ID = os.getenv('TWITCH_CLIENT_ID')
 TWITCH_CLIENT_SECRET = os.getenv('TWITCH_CLIENT_SECRET')
-TWITCH_STREAMER_ID = os.getenv('TWITCH_STREAMER_ID')  # This is numeric: e.g. 831220169 for plenton769
+TWITCH_STREAMER_ID = os.getenv('TWITCH_STREAMER_ID')
+DETA_PROJECT_KEY = os.getenv('DETA_PROJECT_KEY')
 
-LINKED_ACCOUNTS_FILE = 'linked_accounts.json'
+# Deta setup
+deta = Deta(DETA_PROJECT_KEY)
+db = deta.Base("linked_accounts")
 
 intents = discord.Intents.default()
 intents.members = True
@@ -24,27 +27,21 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 access_token = None
 
 
-def load_links():
-    if not os.path.exists(LINKED_ACCOUNTS_FILE):
-        return {}
-    with open(LINKED_ACCOUNTS_FILE, 'r') as f:
-        return json.load(f)
+# Deta DB functions
+async def get_linked_twitch(discord_id):
+    result = db.get(str(discord_id))
+    return result["twitch_username"] if result else None
 
 
-def save_links(data):
-    with open(LINKED_ACCOUNTS_FILE, 'w') as f:
-        json.dump(data, f)
+async def set_linked_twitch(discord_id, twitch_username):
+    db.put({"key": str(discord_id), "twitch_username": twitch_username})
 
 
-@bot.command()
-async def link(ctx, twitch_username: str):
-    """Link your Discord account to your Twitch username."""
-    data = load_links()
-    data[str(ctx.author.id)] = twitch_username.lower()
-    save_links(data)
-    await ctx.send(f"{ctx.author.mention}, your Twitch account has been linked to `{twitch_username}`.")
+async def get_all_links():
+    return db.fetch().items
 
 
+# Twitch API
 async def get_twitch_app_access_token():
     async with aiohttp.ClientSession() as session:
         url = 'https://id.twitch.tv/oauth2/token'
@@ -69,14 +66,14 @@ async def is_user_subbed(twitch_user_login):
             'Authorization': f'Bearer {access_token}'
         }
 
-        # Get user ID
+        # Get Twitch user ID
         async with session.get(f'https://api.twitch.tv/helix/users?login={twitch_user_login}', headers=headers) as user_resp:
             user_data = await user_resp.json()
             if not user_data['data']:
                 return False
             user_id = user_data['data'][0]['id']
 
-        # Check sub
+        # Check subscription status
         async with session.get(
             f'https://api.twitch.tv/helix/subscriptions/user?broadcaster_id={TWITCH_STREAMER_ID}&user_id={user_id}',
             headers=headers
@@ -84,6 +81,15 @@ async def is_user_subbed(twitch_user_login):
             return sub_resp.status == 200
 
 
+# Discord command
+@bot.command()
+async def link(ctx, twitch_username: str):
+    """Link your Discord account to your Twitch username."""
+    await set_linked_twitch(ctx.author.id, twitch_username.lower())
+    await ctx.send(f"{ctx.author.mention}, your Twitch account has been linked to `{twitch_username}`.")
+
+
+# Periodic sub check
 @tasks.loop(hours=24)
 async def check_subs():
     guild = bot.get_guild(GUILD_ID)
@@ -92,10 +98,12 @@ async def check_subs():
 
     role = guild.get_role(TWITCH_SUB_ROLE_ID)
     log_channel = discord.utils.get(guild.text_channels, name='logs')
-    links = load_links()
+    linked_users = await get_all_links()
 
-    for discord_id, twitch_username in links.items():
-        member = guild.get_member(int(discord_id))
+    for user in linked_users:
+        discord_id = int(user["key"])
+        twitch_username = user["twitch_username"]
+        member = guild.get_member(discord_id)
         if not member:
             continue
 
@@ -116,5 +124,8 @@ async def check_subs():
 
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user}")
+    print(f"Bot is online as {bot.user}")
     check_subs.start()
+
+
+bot.run(TOKEN)
