@@ -2,10 +2,10 @@ import os
 import discord
 from discord.ext import tasks, commands
 import aiohttp
-from deta import Deta
+import redis.asyncio as redis
 from dotenv import load_dotenv
 
-load_dotenv()  # Only for local use
+load_dotenv()  # Optional for local testing
 
 # Environment Variables
 TOKEN = os.getenv('DISCORD_BOT_TOKEN')
@@ -14,11 +14,19 @@ TWITCH_SUB_ROLE_ID = int(os.getenv('TWITCH_SUB_ROLE_ID'))
 TWITCH_CLIENT_ID = os.getenv('TWITCH_CLIENT_ID')
 TWITCH_CLIENT_SECRET = os.getenv('TWITCH_CLIENT_SECRET')
 TWITCH_STREAMER_ID = os.getenv('TWITCH_STREAMER_ID')
-DETA_PROJECT_KEY = os.getenv('DETA_PROJECT_KEY')
+UPSTASH_REDIS_URL = os.getenv("UPSTASH_REDIS_URL")
+UPSTASH_REDIS_TOKEN = os.getenv("UPSTASH_REDIS_TOKEN")
 
-# Deta setup
-deta = Deta(DETA_PROJECT_KEY)
-db = deta.Base("linked_accounts")
+# Redis Setup
+redis_client = redis.from_url(
+    UPSTASH_REDIS_URL,
+    encoding="utf-8",
+    decode_responses=True,
+    username="default",
+    password=UPSTASH_REDIS_TOKEN
+)
+
+LINK_KEY_PREFIX = "linked:"
 
 intents = discord.Intents.default()
 intents.members = True
@@ -26,20 +34,19 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 access_token = None
 
-
-# Deta DB functions
+# Redis functions
 async def get_linked_twitch(discord_id):
-    result = db.get(str(discord_id))
-    return result["twitch_username"] if result else None
-
+    return await redis_client.get(LINK_KEY_PREFIX + str(discord_id))
 
 async def set_linked_twitch(discord_id, twitch_username):
-    db.put({"key": str(discord_id), "twitch_username": twitch_username})
-
+    await redis_client.set(LINK_KEY_PREFIX + str(discord_id), twitch_username)
 
 async def get_all_links():
-    return db.fetch().items
-
+    keys = await redis_client.keys(LINK_KEY_PREFIX + "*")
+    return [
+        {"key": key.replace(LINK_KEY_PREFIX, ""), "twitch_username": await redis_client.get(key)}
+        for key in keys
+    ]
 
 # Twitch API
 async def get_twitch_app_access_token():
@@ -54,7 +61,6 @@ async def get_twitch_app_access_token():
             data = await resp.json()
             return data['access_token']
 
-
 async def is_user_subbed(twitch_user_login):
     global access_token
     if access_token is None:
@@ -66,30 +72,25 @@ async def is_user_subbed(twitch_user_login):
             'Authorization': f'Bearer {access_token}'
         }
 
-        # Get Twitch user ID
         async with session.get(f'https://api.twitch.tv/helix/users?login={twitch_user_login}', headers=headers) as user_resp:
             user_data = await user_resp.json()
             if not user_data['data']:
                 return False
             user_id = user_data['data'][0]['id']
 
-        # Check subscription status
         async with session.get(
             f'https://api.twitch.tv/helix/subscriptions/user?broadcaster_id={TWITCH_STREAMER_ID}&user_id={user_id}',
             headers=headers
         ) as sub_resp:
             return sub_resp.status == 200
 
-
-# Discord command
+# Discord commands and events
 @bot.command()
 async def link(ctx, twitch_username: str):
     """Link your Discord account to your Twitch username."""
     await set_linked_twitch(ctx.author.id, twitch_username.lower())
     await ctx.send(f"{ctx.author.mention}, your Twitch account has been linked to `{twitch_username}`.")
 
-
-# Periodic sub check
 @tasks.loop(hours=24)
 async def check_subs():
     guild = bot.get_guild(GUILD_ID)
@@ -121,11 +122,9 @@ async def check_subs():
         except Exception as e:
             print(f"Error checking {twitch_username}: {e}")
 
-
 @bot.event
 async def on_ready():
     print(f"Bot is online as {bot.user}")
     check_subs.start()
-
 
 bot.run(TOKEN)
